@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nvidia-audio2face-sdk"
+version = "0.1.0"
+description = "Python interface for NVIDIA Audio2Face 3D SDK vertex animation"
+readme = "PYTHON_README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.txt" }
+dependencies = ["numpy>=1.23", "scipy>=1.9", "huggingface-hub>=0.27", "filelock>=3.12"]
+
+[project.scripts]
+audio2face-cache = "audio2face_sdk.cli:main"
+
+[tool.scikit-build]
+wheel.packages = ["src/audio2face_sdk"]
+cmake.build-type = "Release"
+build.targets = ["audio2face_python"]
+editable.mode = "redirect"
+
+[tool.scikit-build.cmake.define]
+BUILD_TESTING = "OFF"

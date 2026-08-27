@@ -5,7 +5,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 from filelock import FileLock
 from huggingface_hub import snapshot_download
@@ -17,6 +20,29 @@ _REQUIRED_FILES = (
     "model_config_Claire.json", "model_config_James.json", "model_config_Mark.json",
     "model_data_Claire.npz", "model_data_James.npz", "model_data_Mark.npz",
 )
+_IDENTITIES = ("Claire", "James", "Mark")
+
+
+@dataclass(frozen=True)
+class IdentityNeutralModel:
+    """Neutral skin geometry and fitting mask for an Audio2Face identity."""
+
+    identity: str
+    vertices: np.ndarray
+    frontal_mask: np.ndarray
+    source_path: Path
+
+
+@dataclass(frozen=True)
+class IdentitySkinModel:
+    """Complete actor skin rig used for neutral and blendshape fitting."""
+
+    identity: str
+    neutral: np.ndarray
+    frontal_mask: np.ndarray
+    pose_names: tuple[str, ...]
+    pose_vertices: np.ndarray
+    source_path: Path
 
 
 def _model_cache_dir() -> Path:
@@ -61,6 +87,72 @@ def _download_model(destination: Path) -> None:
             f"Could not download {DEFAULT_MODEL_REPO} from Hugging Face. "
             "Check network access and HF_TOKEN if authentication is required."
         ) from error
+
+
+def _canonical_identity(identity: str) -> str:
+    if not isinstance(identity, str) or not identity.strip():
+        raise TypeError("identity must be a non-empty actor name")
+    requested = identity.strip().casefold()
+    for actor in _IDENTITIES:
+        if actor.casefold() == requested:
+            return actor
+    raise ValueError(f"Unknown identity {identity!r}. Available identities: {', '.join(_IDENTITIES)}")
+
+
+def prepare_identity_model(identity: str = "Claire") -> Path:
+    """Download, cache, and return an actor's neutral skin model archive."""
+    actor = _canonical_identity(identity)
+    model_dir = _model_cache_dir()
+    model_dir.parent.mkdir(parents=True, exist_ok=True)
+    asset = model_dir / f"bs_skin_{actor}.npz"
+    with FileLock(model_dir.parent / ".Audio2Face-3D-v3.0.lock"):
+        if not asset.is_file():
+            model_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                snapshot_download(
+                    repo_id=DEFAULT_MODEL_REPO,
+                    local_dir=model_dir,
+                    allow_patterns=[asset.name],
+                )
+            except (HfHubHTTPError, EntryNotFoundError) as error:
+                raise RuntimeError(
+                    f"Could not download {asset.name} from {DEFAULT_MODEL_REPO}. "
+                    "Check network access and HF_TOKEN if authentication is required."
+                ) from error
+        if not asset.is_file():
+            raise FileNotFoundError(f"Downloaded model does not contain {asset.name}")
+    return asset
+
+
+def load_identity_neutral(identity: str = "Claire") -> IdentityNeutralModel:
+    """Return a copy of an actor's neutral vertices and frontal fitting mask."""
+    actor = _canonical_identity(identity)
+    source = prepare_identity_model(actor)
+    with np.load(source, allow_pickle=False) as data:
+        vertices = np.array(data["neutral"], dtype=np.float32, copy=True)
+        frontal_mask = np.array(data["frontalMask"], dtype=np.int64, copy=True)
+    vertices.setflags(write=False)
+    frontal_mask.setflags(write=False)
+    return IdentityNeutralModel(actor, vertices, frontal_mask, source)
+
+
+def load_identity_skin_model(identity: str = "Claire") -> IdentitySkinModel:
+    """Load an actor's neutral mesh and all non-neutral skin blendshapes."""
+    actor = _canonical_identity(identity)
+    source = prepare_identity_model(actor)
+    with np.load(source, allow_pickle=False) as data:
+        neutral = np.array(data["neutral"], dtype=np.float32, copy=True)
+        frontal_mask = np.array(data["frontalMask"], dtype=np.int64, copy=True)
+        names = tuple(
+            name for value in data["poseNames"]
+            if (name := value.decode() if isinstance(value, bytes) else str(value)) != "neutral"
+        )
+        pose_vertices = neutral[None] + np.stack(
+            [np.asarray(data[name], dtype=np.float32) for name in names]
+        )
+    for value in (neutral, frontal_mask, pose_vertices):
+        value.setflags(write=False)
+    return IdentitySkinModel(actor, neutral, frontal_mask, names, pose_vertices, source)
 
 
 def _build_engine(model_dir: Path, device_id: int) -> None:
